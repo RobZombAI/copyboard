@@ -140,7 +140,8 @@ def write_clipboard(item):
 # Tema macOS nativo: vibrancy HUD, blu sistema, SF Pro
 ROW_H = 36
 VISIBLE_ROWS = 8
-FOOTER_H = 24
+FOOTER_H = 22
+PAD_Y = 6
 MAX_SHOW = 30
 
 def mac_colors():
@@ -183,7 +184,7 @@ class PickerView(NSView):
         self.scroll = 0
         n = len(self.items)
         vis = min(n, VISIBLE_ROWS)
-        h = int(vis * (ROW_H + 2) + 6 + FOOTER_H - 6)
+        h = int(PAD_Y * 2 + vis * (ROW_H + 2) - 2 + FOOTER_H)
         self.h = h
         self._rebuild_thumbs()
         if self.window():
@@ -211,7 +212,7 @@ class PickerView(NSView):
             img = NSImage.alloc().initWithContentsOfFile_(it["path"])
             if not img:
                 continue
-            y = 6 + (i - lo) * (ROW_H + 2)
+            y = PAD_Y + (i - lo) * (ROW_H + 2)
             tw = ROW_H - 12
             iv = NSImageView.alloc().initWithFrame_(NSMakeRect(38, y + 6, tw + 20, tw))
             iv.setImage_(img)
@@ -241,7 +242,7 @@ class PickerView(NSView):
         lo, hi = self._visible_range()
         for i in range(lo, hi):
             it = self.items[i]
-            y = 6 + (i - lo) * (ROW_H + 2)
+            y = PAD_Y + (i - lo) * (ROW_H + 2)
             r = NSMakeRect(6, y - 3, w - 12, ROW_H)
             sel = (i == self.sel)
             if sel:
@@ -258,12 +259,12 @@ class PickerView(NSView):
                 label = first_line[:70] + ("\u2026" if len(first_line) > 70 else "")
                 tx = r.origin.x + 34
             self._drawtext(label, tx, y + 7, f, tcol)
-        # indicatore scroll (solo se serve)
-        if len(self.items) > VISIBLE_ROWS:
-            fsb = NSFont.boldSystemFontOfSize_(9)
-            self._drawtext("\u25b2\u25bc", w - 30, 4, fsb, mc["hint"])
         hb = self.bounds()
         fy = hb.size.height - FOOTER_H + 7
+        # indicatore scroll (solo se serve), allineato al footer
+        if len(self.items) > VISIBLE_ROWS:
+            fsb = NSFont.boldSystemFontOfSize_(9)
+            self._drawtext("\u25b2\u25bc", w - 34, fy, fsb, mc["hint"])
         self._drawtext("\u2191\u2193 incolla \u00b7 esc chiudi", 12, fy, fs, mc["hint"])
         self._drawtext("RobZomb", w - 58, fy, fs, mc["hint"])
 
