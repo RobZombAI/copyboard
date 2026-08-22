@@ -1,0 +1,10 @@
+#!/bin/bash
+# CopyBoard launcher — passa per Terminal.app per ereditarne il permesso Accessibilità
+LOG="$HOME/.copyboard.log"
+for PID in $(pgrep -f "copyboard.py" 2>/dev/null); do kill -9 "$PID" 2>/dev/null; done
+osascript <<'APPLESCRIPT' >/dev/null 2>&1
+tell application "Terminal"
+    activate
+    do script "/usr/bin/python3 -u /Users/robzomb/Mac_CopyBoard/copyboard.py >> /Users/robzomb/.copyboard.log 2>&1 & exit"
+end tell
+APPLESCRIPT
