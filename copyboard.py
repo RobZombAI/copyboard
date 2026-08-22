@@ -1,0 +1,479 @@
+#!/usr/bin/env python3
+# CopyBoard — clipboard manager stile Windows Win+V per macOS
+# ⌘V apre la finestrella dei recenti; frecce/Invio o mouse per scegliere.
+import os, json, time, hashlib, threading
+import objc
+from Foundation import NSObject, NSMakeRect, NSData, NSDate, NSTimer, NSRunLoop, NSDefaultRunLoopMode
+from AppKit import (NSApplication, NSApp, NSPasteboard, NSImage, NSColor,
+                    NSFont, NSBezierPath, NSStatusBar, NSMenu, NSMenuItem,
+                    NSApplicationActivationPolicyAccessory)
+from AppKit import (NSPanel, NSView, NSWindowStyleMaskBorderless,
+                    NSWindowStyleMaskNonactivatingPanel, NSBackingStoreBuffered,
+                    NSStatusWindowLevel, NSFloatingWindowLevel)
+from Quartz import *
+from Quartz import CoreGraphics as CG
+from AppKit import NSMouseInRect
+
+APP_DIR = os.path.expanduser("~/.copyboard")
+IMG_DIR = os.path.join(APP_DIR, "images")
+DB_PATH = os.path.join(APP_DIR, "history.json")
+MAX_ITEMS = 50
+PANEL_W, PANEL_H, ROW_H = 420, 380, 44
+
+os.makedirs(IMG_DIR, exist_ok=True)
+
+
+def load_history():
+    try:
+        with open(DB_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_history(items):
+    tmp = DB_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(items[:MAX_ITEMS], f)
+    os.replace(tmp, DB_PATH)
+
+
+class History:
+    """Lista condivisa degli elementi copiati."""
+    items = load_history()
+
+    @classmethod
+    def add_text(cls, text):
+        # dedup: se identico al primo, skip
+        if cls.items and cls.items[0]["type"] == "text" and cls.items[0]["text"] == text:
+            cls.items[0]["ts"] = time.time()
+            save_history(cls.items); return
+        cls._dedupe_remove(text=text)
+        cls.items.insert(0, {"type": "text", "text": text, "ts": time.time()})
+        del cls.items[MAX_ITEMS:]
+        save_history(cls.items)
+
+    @classmethod
+    def add_image(cls, png_path):
+        if cls.items and cls.items[0]["type"] == "image" and cls.items[0]["path"] == png_path:
+            cls.items[0]["ts"] = time.time()
+            save_history(cls.items); return
+        cls._dedupe_remove(path=png_path)
+        try:
+            sz = _human_size(os.path.getsize(png_path))
+        except Exception:
+            sz = ""
+        cls.items.insert(0, {"type": "image", "path": png_path, "ts": time.time(), "size": sz})
+        del cls.items[MAX_ITEMS:]
+        save_history(cls.items)
+
+    @classmethod
+    def _dedupe_remove(cls, text=None, path=None):
+        out = []
+        for it in cls.items:
+            if text is not None and it["type"] == "text" and it["text"] == text:
+                continue
+            if path is not None and it["type"] == "image" and it["path"] == path:
+                continue
+            out.append(it)
+        cls.items[:] = out
+
+
+def _human_size(n):
+    for u in ("B", "KB", "MB"):
+        if n < 1024 or u == "MB":
+            return f"{n:.0f}{u}" if u == "B" else f"{n/1.0:.0f}{u}" if False else f"{round(n)}{u}" if u=="B" else f"{n/1024:.0f}KB"
+        n /= 1024.0
+
+
+def read_clipboard(pb):
+    """Ritorna ('text', s) | ('image', png_path) | None dal pasteboard."""
+    types = pb.types() or []
+    s = NSStringPboardType
+    if s in types:
+        txt = pb.stringForType_(s)
+        if txt and len(txt.strip()) > 0:
+            return ("text", str(txt))
+    tiff = NSTIFFPboardType
+    png_t = NSPasteboardTypePNG if hasattr(NSPasteboard, "NSPasteboardTypePNG") else None
+    for t in ([png_t] if png_t else []) + [tiff]:
+        if t in types:
+            data = pb.dataForType_(t)
+            if data is None:
+                continue
+            img = NSImage.alloc().initWithData_(data)
+            if img is None:
+                continue
+            h = hashlib.md5(bytes(data)).hexdigest()[:16]
+            path = os.path.join(IMG_DIR, h + ".png")
+            if not os.path.exists(path):
+                # converti in PNG via TIFFRepresentation
+                try:
+                    from AppKit import NSBitmapImageFileTypePNG
+                    rep = img.TIFFRepresentation()
+                    bm = NSBitmapImageRep.imageRepWithData_(rep)
+                    png = bm.representationUsingType_properties_(NSBitmapImageFileTypePNG, None)
+                    png.writeToFile_atomically_(path, True)
+                except Exception:
+                    try:
+                        img.initWithContentsOfFile_  # noqa
+                    except Exception:
+                        pass
+                    continue
+            return ("image", path)
+    return None
+
+
+def write_clipboard(item):
+    """Mette l'item selezionato nella clipboard di sistema."""
+    pb = NSPasteboard.generalPasteboard()
+    pb.clearContents()
+    if item["type"] == "text":
+        pb.setString_forType_(item["text"], NSStringPboardType)
+    else:
+        img = NSImage.alloc().initWithContentsOfFile_(item["path"])
+        if img:
+            pb.setData_forType_(img.TIFFRepresentation(), NSTIFFPboardType)
+
+
+# ---------------------------------------------------------------- picker view
+# Tema "Matrix": nero puro, verde fosforo, monospace
+MATRIX_GREEN = None  # inizializzato lazy in matrix_colors()
+def matrix_colors():
+    global MATRIX_GREEN
+    if MATRIX_GREEN is None:
+        MATRIX_GREEN = {
+            "green": NSColor.colorWithCalibratedRed_green_blue_alpha_(0.0, 1.0, 0.35, 1.0),
+            "dim":   NSColor.colorWithCalibratedRed_green_blue_alpha_(0.0, 1.0, 0.35, 0.45),
+            "bg":    NSColor.colorWithCalibratedRed_green_blue_alpha_(0.0, 0.04, 0.01, 0.96),
+            "sel_bg": NSColor.colorWithCalibratedRed_green_blue_alpha_(0.0, 1.0, 0.35, 0.16),
+        }
+    return MATRIX_GREEN
+
+MONO_FONT = lambda sz: NSFont.fontWithName_size_("Menlo", sz)
+
+ROW_H = 34
+
+class KeyPanel(NSPanel):
+    """NSPanel borderless che puo' ricevere la tastiera."""
+    def canBecomeKeyWindow(self):
+        return True
+
+    def canBecomeMainWindow(self):
+        return True
+
+
+class PickerView(NSView):
+    def initWithItems_(self, _):
+        self = objc.super(PickerView, self).initWithFrame_(
+            NSMakeRect(0, 0, PANEL_W, PANEL_H))
+        self.items = []
+        self.sel = 0
+        self.thumbs = []
+        return self
+
+    def isFlipped(self):
+        return True
+
+    def acceptsFirstResponder(self):
+        return True
+
+    def refresh(self):
+        self.items = list(History.items)[:10]
+        self.sel = 0
+        self._rebuild_thumbs()
+        n = max(len(self.items), 1)
+        h = int(12 + n * (ROW_H + 4) + 26)
+        if self.window():
+            f = self.window().frame()
+            f.origin.y += f.size.height - h
+            f.size.height = h
+            self.window().setFrame_display_(f, True)
+        self.setNeedsDisplay_(True)
+
+    def _rebuild_thumbs(self):
+        """Crea/aggiorna le subview thumbnail per gli item immagine."""
+        for sv in list(self.thumbs):
+            sv.removeFromSuperview()
+        self.thumbs = []
+        for i, it in enumerate(self.items):
+            if it["type"] != "image":
+                continue
+            img = NSImage.alloc().initWithContentsOfFile_(it["path"])
+            if not img:
+                continue
+            y = 6 + i * (ROW_H + 3)
+            tw = ROW_H - 10
+            iv = NSImageView.alloc().initWithFrame_(NSMakeRect(34, y + 5, tw + 20, tw))
+            iv.setImage_(img)
+            iv.setImageScaling_(1)  # NSImageScaleProportionallyUpOrDown
+            iv.setWantsLayer_(True)
+            iv.layer().setCornerRadius_(3.0)
+            iv.layer().setMasksToBounds_(True)
+            iv.layer().setBorderWidth_(1.0)
+            iv.layer().setBorderColor_(matrix_colors()["green"].CGColor())
+            self.addSubview_(iv)
+            self.thumbs.append(iv)
+
+    def drawRect_(self, rect):
+        try:
+            self._draw(rect)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
+    @objc.python_method
+    def _draw(self, rect):
+        mc = matrix_colors()
+        w = self.bounds().size.width
+        # sfondo nero
+        mc["bg"].set()
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            self.bounds(), 10, 10).fill()
+        f = MONO_FONT(13)
+        fs = MONO_FONT(10)
+        if not self.items:
+            self._drawtext("> clipboard vuota", 16, 24, f, mc["dim"])
+            return
+        for i, it in enumerate(self.items):
+            y = 6 + i * (ROW_H + 3)
+            sel = (i == self.sel)
+            if sel:
+                mc["sel_bg"].set()
+                NSBezierPath.bezierPathWithRect_(NSMakeRect(4, y - 2, w - 8, ROW_H)).fill()
+            prompt = "> " if sel else "  "
+            pcol = mc["green"] if sel else mc["dim"]
+            self._drawtext(prompt, 10, y + 8, f, pcol)
+            if it["type"] == "image":
+                label = "[img] " + (it.get("size") or "")
+                tx = 40
+                tcol = mc["green"] if sel else mc["dim"]
+            else:
+                first_line = it["text"].strip().split("\n")[0]
+                label = first_line[:72] + ("~" if len(first_line) > 72 else "")
+                tx = 32
+                tcol = mc["green"] if sel else NSColor.colorWithCalibratedWhite_alpha_(0.75, 1)
+            self._drawtext(label, tx, y + 8, f, tcol)
+        hb = self.bounds()
+        self._drawtext("\u2500" * 46, 10, hb.size.height - 18, fs, mc["dim"])
+
+    @objc.python_method
+    def _drawtext(self, text, x, y, font, color=None):
+        from AppKit import NSAttributedString
+        attrs = {NSFontAttributeName: font}
+        if color is not None:
+            attrs[NSForegroundColorAttributeName] = color
+        attr = NSAttributedString.alloc().initWithString_attributes_(str(text), attrs)
+        attr.drawAtPoint_((x, y))
+
+    @objc.python_method
+    def confirm_with_item(self, item):
+        print("[CopyBoard] confermato:", (item.get("text") or item.get("path"))[:40])
+        write_clipboard(item)
+        try:
+            History.items.remove(item)
+        except ValueError:
+            pass
+        History.items.insert(0, item)
+        save_history(History.items)
+        Picker.hide()
+
+        def _paste():
+            time.sleep(0.12)
+            post_synthetic_cmd_v()
+            print("[CopyBoard] cmd-v inviato")
+        threading.Thread(target=_paste, daemon=True).start()
+
+    def confirm(self):
+        if 0 <= self.sel < len(self.items):
+            self.confirm_with_item(self.items[self.sel])
+
+    def keyDown_(self, ev):
+        c = ev.characters()
+        kc = ev.keyCode()
+        if kc == 125 or c == "\x1f":           # giu'
+            self.sel = min(self.sel + 1, len(self.items) - 1)
+        elif kc == 126 or c == "\x1e":          # su
+            self.sel = max(self.sel - 1, 0)
+        elif kc == 36 or kc == 76:              # invio
+            self.confirm(); return
+        elif kc == 53:                          # esc
+            Picker.hide(); return
+        elif c == "v" and (ev.modifierFlags() & CGEventFlags.kCGEventFlagMaskCommand):
+            self.confirm(); return              # ⌘V dentro il picker = conferma
+        else:
+            return
+        self.setNeedsDisplay_(True)
+
+    def mouseDown_(self, ev):
+        p = self.convertPoint_fromView_(ev.locationInWindow(), None)
+        idx = int((p.y - 8) // (ROW_H + 4))
+        print("[CopyBoard] click riga:", idx)
+        if 0 <= idx < len(self.items):
+            # un solo click = incolla subito (stile Windows Win+V)
+            self.confirm_with_item(self.items[idx])
+
+
+class Picker(NSObject):
+    panel = None
+    view = None
+
+    @classmethod
+    def ensure(cls):
+        if cls.panel:
+            return
+        v = PickerView.alloc().initWithItems_(None)
+        st = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+        p = KeyPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, PANEL_W, PANEL_H), st, NSBackingStoreBuffered, False)
+        p.setLevel_(NSStatusWindowLevel + 1)
+        p.setOpaque_(False)
+        p.setBackgroundColor_(NSColor.clearColor())
+        p.setHasShadow_(True)
+        try:
+            p.setAlphaValue_(0.97)
+        except Exception:
+            pass
+        v.setWantsLayer_(True)
+        p.setContentView_(v)
+        p.setInitialFirstResponder_(v)
+        cls.panel, cls.view = p, v
+        # click fuori dal pannello -> chiudi
+        from AppKit import NSEvent, NSLeftMouseDownMask
+        cls.monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            NSLeftMouseDownMask,
+            lambda ev: cls.hide() if cls.panel and cls.panel.isVisible()
+                       and not NSMouseInRect(ev.locationInWindow(), cls.panel.frame(), False) else None)
+
+    @classmethod
+    def show(cls):
+        cls.ensure()
+        cls.view.refresh()
+        f = NSScreen.mainScreen().frame()
+        x = f.origin.x + f.size.width - PANEL_W - 60
+        y = f.origin.y + f.size.height * 0.28
+        cls.panel.setFrameTopLeftPoint_((x, y + PANEL_H))
+        cls.panel.makeKeyAndOrderFront_(None)
+        cls.view.window().makeFirstResponder_(cls.view)
+
+    @classmethod
+    def hide(cls):
+        if cls.panel:
+            cls.panel.orderOut_(None)
+
+
+suppress_until = [0.0]  # timestamp fino a cui il tap lascia passare il cmd-v sintetico
+
+
+def post_synthetic_cmd_v():
+    suppress_until[0] = time.time() + 0.6
+    for etype in (kCGEventKeyDown, kCGEventKeyUp):
+        ev = CGEventCreateKeyboardEvent(None, 9, etype == kCGEventKeyDown)
+        CGEventSetFlags(ev, CGEventFlags(kCGEventFlagMaskCommand))
+        CGEventPost(kCGHIDEventTap, ev)
+
+
+# ------------------------------------------------------------- event tap ⌘V
+KEY_V = 9
+tap_ref = {}
+
+
+def tap_callback(proxy, etype, event, refcon):
+    try:
+        if etype == kCGEventKeyDown:
+            flags = CGEventGetFlags(event)
+            kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
+            if int(kc) == KEY_V and (int(flags) & int(kCGEventFlagMaskCommand)):
+                # il nostro cmd-v sintetico: lascialo passare per incollare
+                if time.time() < suppress_until[0]:
+                    return event
+                # se il picker è già aperto, lascia passare (gestito dal picker)
+                if Picker.panel and Picker.panel.isVisible():
+                    return event
+                Picker.show()
+                return None  # ingoia il ⌘V originale
+    except Exception:
+        pass
+    return event
+
+
+def install_tap():
+    mask = CGEventMaskBit(kCGEventKeyDown)
+    tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap,
+                           kCGEventTapOptionDefault, mask, tap_callback, None)
+    if not tap:
+        print("[CopyBoard] ⚠️  Event tap negata: concedi Accessibilità in "
+              "Impostazioni › Privacy › Accessibilità e riavvia CopyBoard.")
+        return False
+    src = CFMachPortCreateRunLoopSource(None, tap, 0)
+    CFRunLoopAddSource(CFRunLoopGetMain(), src, kCFRunLoopCommonModes)
+    CGEventTapEnable(tap, True)
+    tap_ref["tap"] = tap
+    return True
+
+
+# ------------------------------------------------------------------ app delegate
+class Delegate(NSObject):
+    timer = None
+    last_count = -1
+    last_content = None
+
+    def applicationDidFinishLaunching_(self, note):
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        # menu barra stato
+        bar = NSStatusBar.systemStatusBar()
+        item = bar.statusItemWithLength_(-1)  # variable length
+        item.button().setTitle_("📋")
+        menu = NSMenu.alloc().init()
+        mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Apri cronologia (⌘V)", "openPicker:", "")
+        menu.addItem_(mi)
+        mi2 = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Svuota cronologia", "clearHistory:", "")
+        menu.addItem_(mi2)
+        menu.addItem_(NSMenuItem.separatorItem())
+        mq = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Esci", "terminate:", "q")
+        menu.addItem_(mq)
+        item.setMenu_(menu)
+
+        self.last_count = NSPasteboard.generalPasteboard().changeCount()
+        print("[CopyBoard] tap:", install_tap())
+        print("[CopyBoard] creo timer...")
+        self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            0.35, self, "pollClipboard:", None, True)
+        print("[CopyBoard] timer aggiunto, runloop attivo")
+
+    def openPicker_(self, sender):
+        Picker.show()
+
+    def clearHistory_(self, sender):
+        History.items[:] = []
+        save_history([])
+        try:
+            for f in os.listdir(IMG_DIR):
+                os.remove(os.path.join(IMG_DIR, f))
+        except Exception:
+            pass
+
+    def pollClipboard_(self, timer):
+        pb = NSPasteboard.generalPasteboard()
+        if pb.changeCount() == self.last_count:
+            return
+        self.last_count = pb.changeCount()
+        if Picker.panel and Picker.panel.isVisible():
+            return
+        got = read_clipboard(pb)
+        if not got:
+            return
+        kind, payload = got
+        if kind == "text":
+            History.add_text(payload)
+        else:
+            History.add_image(payload)
+
+
+if __name__ == "__main__":
+    app = NSApplication.sharedApplication()
+    dlg = Delegate.alloc().init()
+    app.setDelegate_(dlg)
+    app.run()
