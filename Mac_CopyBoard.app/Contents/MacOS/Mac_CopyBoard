@@ -1,7 +1,0 @@
-#!/bin/bash
-# Launcher standalone: esegue copyboard.py direttamente, senza Terminal.
-LOG="$HOME/.copyboard.log"
-for PID in $(pgrep -f "Mac_CopyBoard/copyboard.py" 2>/dev/null); do
-    [ "$PID" != "$$" ] && kill -9 "$PID" 2>/dev/null
-done
-exec /usr/bin/python3 -u "$(dirname "$0")/../Resources/copyboard.py" >> "$LOG" 2>&1

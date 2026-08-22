@@ -17,7 +17,9 @@ from Quartz import *
 from Quartz import CoreGraphics as CG
 from AppKit import NSMouseInRect
 from AppKit import (NSTableView, NSTextField, NSImageView, NSScrollView,
-                    NSIndexSet, NSLineBreakByWordWrapping, NSView as _NSView)
+                    NSIndexSet, NSLineBreakByWordWrapping, NSView as _NSView,
+                    NSParagraphStyle, NSFontAttributeName,
+                    NSForegroundColorAttributeName, NSParagraphStyleAttributeName)
 
 APP_DIR = os.path.expanduser("~/.copyboard")
 IMG_DIR = os.path.join(APP_DIR, "images")
@@ -447,6 +449,26 @@ def install_tap():
 
 
 # ------------------------------------------------------------------ app delegate
+def make_c_icon():
+    """Icona menubar: 'C' di CopyBoard, template (si adatta a chiaro/scuro)."""
+    img = NSImage.alloc().initWithSize_((18, 18))
+    img.lockFocus()
+    font = NSFont.boldSystemFontOfSize_(15)
+    para = NSParagraphStyle.defaultParagraphStyle().mutableCopy()
+    para.setAlignment_(1)  # center
+    attrs = {
+        NSFontAttributeName: font,
+        NSForegroundColorAttributeName: NSColor.whiteColor(),
+        NSParagraphStyleAttributeName: para,
+    }
+    s = "C"
+    sz = s.sizeWithAttributes_(attrs)
+    s.drawAtPoint_(((18 - sz.width) / 2, (18 - sz.height) / 2 - 1), attrs)
+    img.unlockFocus()
+    img.setTemplate_(True)  # adattamento automatico chiaro/scuro
+    return img
+
+
 class Delegate(NSObject):
     timer = None
     last_count = -1
@@ -454,10 +476,10 @@ class Delegate(NSObject):
 
     def applicationDidFinishLaunching_(self, note):
         NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-        # menu barra stato
+        # menu barra stato: icona "C" di CopyBoard
         bar = NSStatusBar.systemStatusBar()
         item = bar.statusItemWithLength_(-1)  # variable length
-        item.button().setTitle_("📋")
+        item.button().setImage_(make_c_icon())
         menu = NSMenu.alloc().init()
         mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Apri cronologia (⌘V)", "openPicker:", "")
