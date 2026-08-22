@@ -139,6 +139,9 @@ def write_clipboard(item):
 # ---------------------------------------------------------------- picker view
 # Tema macOS nativo: vibrancy HUD, blu sistema, SF Pro
 ROW_H = 36
+VISIBLE_ROWS = 8
+FOOTER_H = 24
+MAX_SHOW = 30
 
 def mac_colors():
     return {
@@ -164,6 +167,8 @@ class PickerView(NSView):
         self.items = []
         self.sel = 0
         self.thumbs = []
+        self.scroll = 0
+        self.h = PANEL_H
         return self
 
     def isFlipped(self):
@@ -173,11 +178,14 @@ class PickerView(NSView):
         return True
 
     def refresh(self):
-        self.items = list(History.items)[:10]
+        self.items = list(History.items)[:30]
         self.sel = 0
+        self.scroll = 0
+        n = len(self.items)
+        vis = min(n, VISIBLE_ROWS)
+        h = int(vis * (ROW_H + 2) + 8 + FOOTER_H)
+        self.h = h
         self._rebuild_thumbs()
-        n = max(len(self.items), 1)
-        h = int(12 + n * (ROW_H + 4) + 26)
         if self.window():
             f = self.window().frame()
             f.origin.y += f.size.height - h
@@ -185,18 +193,25 @@ class PickerView(NSView):
             self.window().setFrame_display_(f, True)
         self.setNeedsDisplay_(True)
 
+    def _visible_range(self):
+        vis = min(len(self.items), VISIBLE_ROWS)
+        lo = max(0, min(self.scroll, len(self.items) - vis))
+        return lo, lo + vis
+
     def _rebuild_thumbs(self):
         """Crea/aggiorna le subview thumbnail per gli item immagine."""
         for sv in list(self.thumbs):
             sv.removeFromSuperview()
         self.thumbs = []
-        for i, it in enumerate(self.items):
+        lo, hi = self._visible_range()
+        for i in range(lo, hi):
+            it = self.items[i]
             if it["type"] != "image":
                 continue
             img = NSImage.alloc().initWithContentsOfFile_(it["path"])
             if not img:
                 continue
-            y = 8 + i * (ROW_H + 2)
+            y = 6 + (i - lo) * (ROW_H + 2)
             tw = ROW_H - 12
             iv = NSImageView.alloc().initWithFrame_(NSMakeRect(38, y + 6, tw + 20, tw))
             iv.setImage_(img)
@@ -221,10 +236,12 @@ class PickerView(NSView):
         f = NSFont.systemFontOfSize_(13)
         fs = NSFont.systemFontOfSize_(10)
         if not self.items:
-            self._drawtext("Clipboard vuota", 16, 24, f, mc["dim"])
+            self._drawtext("Clipboard vuota", 16, 20, f, mc["dim"])
             return
-        for i, it in enumerate(self.items):
-            y = 8 + i * (ROW_H + 2)
+        lo, hi = self._visible_range()
+        for i in range(lo, hi):
+            it = self.items[i]
+            y = 6 + (i - lo) * (ROW_H + 2)
             r = NSMakeRect(6, y - 3, w - 12, ROW_H)
             sel = (i == self.sel)
             if sel:
@@ -241,9 +258,14 @@ class PickerView(NSView):
                 label = first_line[:70] + ("\u2026" if len(first_line) > 70 else "")
                 tx = r.origin.x + 34
             self._drawtext(label, tx, y + 7, f, tcol)
+        # indicatore scroll (solo se serve)
+        if len(self.items) > VISIBLE_ROWS:
+            fsb = NSFont.boldSystemFontOfSize_(9)
+            self._drawtext("\u25b2\u25bc", w - 30, 4, fsb, mc["hint"])
         hb = self.bounds()
-        self._drawtext("\u2191\u2193 incolla \u00b7 esc chiudi", 12, hb.size.height - 18, fs, mc["hint"])
-        self._drawtext("RobZomb", w - 58, hb.size.height - 18, fs, mc["hint"])
+        fy = hb.size.height - FOOTER_H + 7
+        self._drawtext("\u2191\u2193 incolla \u00b7 esc chiudi", 12, fy, fs, mc["hint"])
+        self._drawtext("RobZomb", w - 58, fy, fs, mc["hint"])
 
     @objc.python_method
     def _drawtext(self, text, x, y, font, color=None):
@@ -276,13 +298,23 @@ class PickerView(NSView):
         if 0 <= self.sel < len(self.items):
             self.confirm_with_item(self.items[self.sel])
 
+    def _ensure_visible(self):
+        lo, hi = self._visible_range()
+        if self.sel < lo:
+            self.scroll = self.sel
+        elif self.sel >= hi:
+            self.scroll = self.sel - VISIBLE_ROWS + 1
+        self._rebuild_thumbs()
+
     def keyDown_(self, ev):
         c = ev.characters()
         kc = ev.keyCode()
         if kc == 125 or c == "\x1f":           # giu'
             self.sel = min(self.sel + 1, len(self.items) - 1)
+            self._ensure_visible()
         elif kc == 126 or c == "\x1e":          # su
             self.sel = max(self.sel - 1, 0)
+            self._ensure_visible()
         elif kc == 36 or kc == 76:              # invio
             self.confirm(); return
         elif kc == 53:                          # esc
@@ -295,10 +327,10 @@ class PickerView(NSView):
 
     def mouseDown_(self, ev):
         p = self.convertPoint_fromView_(ev.locationInWindow(), None)
-        idx = int((p.y - 8) // (ROW_H + 4))
+        idx = self.scroll + int((p.y - 3) // (ROW_H + 2))
         print("[CopyBoard] click riga:", idx)
         if 0 <= idx < len(self.items):
-            # un solo click = incolla subito (stile Windows Win+V)
+            # un solo click = incolla subito
             self.confirm_with_item(self.items[idx])
 
 
