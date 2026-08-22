@@ -47,17 +47,18 @@ class History:
         # dedup: se identico al primo, skip
         if cls.items and cls.items[0]["type"] == "text" and cls.items[0]["text"] == text:
             cls.items[0]["ts"] = time.time()
-            save_history(cls.items); return
+            save_history(cls.items); return False
         cls._dedupe_remove(text=text)
         cls.items.insert(0, {"type": "text", "text": text, "ts": time.time()})
         del cls.items[MAX_ITEMS:]
         save_history(cls.items)
+        return True
 
     @classmethod
     def add_image(cls, png_path):
         if cls.items and cls.items[0]["type"] == "image" and cls.items[0]["path"] == png_path:
             cls.items[0]["ts"] = time.time()
-            save_history(cls.items); return
+            save_history(cls.items); return False
         cls._dedupe_remove(path=png_path)
         try:
             sz = _human_size(os.path.getsize(png_path))
@@ -66,6 +67,7 @@ class History:
         cls.items.insert(0, {"type": "image", "path": png_path, "ts": time.time(), "size": sz})
         del cls.items[MAX_ITEMS:]
         save_history(cls.items)
+        return True
 
     @classmethod
     def _dedupe_remove(cls, text=None, path=None):
@@ -496,16 +498,18 @@ class Delegate(NSObject):
         if pb.changeCount() == self.last_count:
             return
         self.last_count = pb.changeCount()
-        if Picker.panel and Picker.panel.isVisible():
-            return
         got = read_clipboard(pb)
         if not got:
             return
         kind, payload = got
         if kind == "text":
-            History.add_text(payload)
+            added = History.add_text(payload)
         else:
-            History.add_image(payload)
+            added = History.add_image(payload)
+        # aggiorna la lista live anche se il pannello è aperto
+        # (add_text/add_image ritornano False se l'elemento è identico al primo: skip)
+        if added and Picker.panel and Picker.panel.isVisible():
+            Picker.view.refresh()
 
 
 if __name__ == "__main__":
