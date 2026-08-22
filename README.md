@@ -16,10 +16,10 @@ Premi ⌘V in *qualsiasi* app e invece del solito incolla si apre una finestrell
 | 📝 Testi + 🖼 Immagini | Registra tutto ciò che copi, screenshot inclusi |
 | 🎯 Incolla diretto | Click o Invio → incolla nell'app di destinazione e chiudi |
 | ⌨️ Navigazione completa | Frecce ⬆⬇ + Invio, click singolo, Esc per annullare |
-| 💾 Cronologia persistente | 50 elementi, sopravvive ai riavvii (`~/.copyboard/history.json`) |
+| 📜 Scroll | Fino a 30 elementi, la lista scorre seguendo la selezione |
+| 💾 Cronologia persistente | Sopravvive ai riavvii (`~/.copyboard/history.json`) |
 | 🔁 Dedup automatico | Copiare due volte lo stesso testo non crea doppioni |
-| 🖥 Anteprime | Thumbnail reali delle immagini copiate, con dimensione |
-| 🖥 Interfaccia macOS nativa | Vibrancy HUD, accento blu sistema, SF Pro — si fonde col desktop |
+| 🖼 Anteprime | Thumbnail reali delle immagini copiate, con dimensione |
 | 🚪 Chiudi al click fuori | Come ogni popover che si rispetti |
 | 📋 Barra menu | Icona 📋 con apri cronologia / svuota / esci |
 | 🚀 Autostart | LaunchAgent incluso: parte da solo al login |
@@ -38,13 +38,13 @@ Fatto. Al primo avvio vedrai lampeggiare una finestra di Terminal (è il meccani
 ### Autostart al login (consigliato)
 
 ```bash
-cp com.robzomb.copyboard.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.robzomb.copyboard.plist
+cp com.robzomb.mac-copyboard.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.robzomb.mac-copyboard.plist
 ```
 
 Per disattivarlo:
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.robzomb.copyboard.plist
+launchctl unload ~/Library/LaunchAgents/com.robzomb.mac-copyboard.plist
 ```
 
 ## 📖 Guida operativa
@@ -53,9 +53,9 @@ launchctl unload ~/Library/LaunchAgents/com.robzomb.copyboard.plist
 
 1. **Copia come sempre** con ⌘C (testi, link) o ⌘⇧⌃4 (screenshot) — Mac_CopyBoard registra tutto in silenzio
 2. Dove vuoi incollare qualcosa di **vecchio**, premi **⌘V**
-3. La finestrella mostra gli ultimi 10 elementi:
-   - `> testo...` — anteprima della prima riga
-   - `[img] 245KB` — immagine con thumbnail e dimensione
+3. La finestrella mostra gli ultimi elementi (fino a 30, scorri con le frecce):
+   - `testo...` — anteprima della prima riga
+   - `🖼 Immagine · 245KB` — immagine con thumbnail e dimensione
 4. **Scegli**:
    - ⬆⬇ per muoverti, **Invio** per incollare
    - oppure **click** sulla riga = incolla immediato
@@ -83,18 +83,18 @@ Modifica le costanti in cima a `copyboard.py`:
 |---|---|---|
 | `MAX_ITEMS` | 50 | elementi massimi in cronologia |
 | `PANEL_W` | 420 | larghezza finestrella (px) |
-| `ROW_H` | 34 | altezza riga |
-| `History.items)[:10]` | 10 | elementi mostrati nella lista |
+| `VISIBLE_ROWS` | 8 | righe visibili (il resto si scrolla) |
+| `MAX_SHOW` | 30 | elementi massimi nella lista |
 
 Poi riavvia: `pkill -f copyboard.py && open Mac_CopyBoard.app`
 
 ## 🔧 Come funziona sotto il cofano
 
-CopyBoard usa tre pezzi di tecnologia Apple, senza librerie esterne:
+Mac_CopyBoard usa tre pezzi di tecnologia Apple, senza librerie esterne:
 
 1. **Polling pasteboard** (`NSPasteboard.changeCount`) — rileva ogni nuova copia 3 volte/sec, salva testo o PNG su disco
 2. **Event tap Quartz** (`CGEventTapCreate`) — intercetta il ⌘V globale. Qui serve il permesso **Accessibilità**: invece di chiederlo all'utente, Mac_CopyBoard viene lanciato **attraverso Terminal.app** (via `osascript do script`) che eredita il permesso che Terminal già possiede. Zero configurazione.
-3. **Anti-loop sintetico** — quando CopyBoard incolla, invia un ⌘V sintetico marcato con una finestra di soppressione di 600ms, così il suo stesso event tap non lo ri-intercetta (il bug classico di questo tipo di tool)
+3. **Anti-loop sintetico** — quando Mac_CopyBoard incolla, invia un ⌘V sintetico marcato con una finestra di soppressione di 600ms, così il suo stesso event tap non lo ri-intercetta (il bug classico di questo tipo di tool)
 
 La finestrella è un `NSPanel` non attivante (`NSWindowStyleMaskNonactivatingPanel` + override di `canBecomeKeyWindow`): prende la tastiera **senza rubare il focus** all'app sotto — per questo l'incolla atterra sempre nel posto giusto.
 
@@ -119,10 +119,10 @@ Mac_CopyBoard/
 └── README.md
 ```
 
----
-
-*Realizzato da **RobZomb*** 🖤
-
 ## Licenza
 
 MIT — fai quello che vuoi.
+
+---
+
+*Realizzato da **RobZomb*** 🖤

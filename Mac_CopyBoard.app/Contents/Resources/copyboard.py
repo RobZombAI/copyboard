@@ -183,7 +183,7 @@ class PickerView(NSView):
         self.scroll = 0
         n = len(self.items)
         vis = min(n, VISIBLE_ROWS)
-        h = int(vis * (ROW_H + 2) + 8 + FOOTER_H)
+        h = int(vis * (ROW_H + 2) + 6 + FOOTER_H - 6)
         self.h = h
         self._rebuild_thumbs()
         if self.window():
