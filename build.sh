@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build CopyBoard.app (wrapper leggero verso la venv/pyobjc di sistema)
+# Build Mac_CopyBoard.app — standalone, nessuna finestra Terminal
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 APP="$DIR/Mac_CopyBoard.app"
@@ -8,19 +8,17 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cat > "$APP/Contents/MacOS/Mac_CopyBoard" <<'EOF'
 #!/bin/bash
-# CopyBoard launcher — passa per Terminal.app per ereditarne il permesso Accessibilità
+# Launcher standalone: esegue copyboard.py direttamente, senza Terminal.
 LOG="$HOME/.copyboard.log"
-for PID in $(pgrep -f "copyboard.py" 2>/dev/null); do kill -9 "$PID" 2>/dev/null; done
-osascript <<'APPLESCRIPT' >/dev/null 2>&1
-tell application "Terminal"
-    activate
-    do script "/usr/bin/python3 -u /Users/robzomb/Mac_CopyBoard/copyboard.py >> /Users/robzomb/.copyboard.log 2>&1 & exit"
-end tell
-APPLESCRIPT
+for PID in $(pgrep -f "Mac_CopyBoard/copyboard.py" 2>/dev/null); do
+    [ "$PID" != "$$" ] && kill -9 "$PID" 2>/dev/null
+done
+exec /usr/bin/python3 -u "$(dirname "$0")/../Resources/copyboard.py" >> "$LOG" 2>&1
 EOF
 chmod +x "$APP/Contents/MacOS/Mac_CopyBoard"
 
 cp "$DIR/copyboard.py" "$APP/Contents/Resources/copyboard.py"
+cp "$DIR/icon.icns" "$APP/Contents/Resources/icon.icns"
 
 cat > "$APP/Contents/Resources/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -30,10 +28,15 @@ cat > "$APP/Contents/Resources/Info.plist" <<'EOF'
     <key>CFBundleExecutable</key><string>Mac_CopyBoard</string>
     <key>CFBundleIdentifier</key><string>com.robzomb.mac-copyboard</string>
     <key>CFBundleName</key><string>Mac_CopyBoard</string>
-    <key>CFBundleVersion</key><string>1.0.0</string>
+    <key>CFBundleDisplayName</key><string>Mac_CopyBoard</string>
+    <key>CFBundleIconFile</key><string>icon</string>
+    <key>CFBundleVersion</key><string>2.0.0</string>
+    <key>CFBundleShortVersionString</key><string>2.0.0</string>
     <key>CFBundlePackageType</key><string>APPL</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSHumanReadableCopyright</key><string>© 2026 RobZomb</string>
 </dict>
 </plist>
 EOF

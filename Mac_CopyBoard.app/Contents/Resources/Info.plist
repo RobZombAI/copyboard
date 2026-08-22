@@ -5,9 +5,14 @@
     <key>CFBundleExecutable</key><string>Mac_CopyBoard</string>
     <key>CFBundleIdentifier</key><string>com.robzomb.mac-copyboard</string>
     <key>CFBundleName</key><string>Mac_CopyBoard</string>
-    <key>CFBundleVersion</key><string>1.0.0</string>
+    <key>CFBundleDisplayName</key><string>Mac_CopyBoard</string>
+    <key>CFBundleIconFile</key><string>icon</string>
+    <key>CFBundleVersion</key><string>2.0.0</string>
+    <key>CFBundleShortVersionString</key><string>2.0.0</string>
     <key>CFBundlePackageType</key><string>APPL</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSHumanReadableCopyright</key><string>© 2026 RobZomb</string>
 </dict>
 </plist>

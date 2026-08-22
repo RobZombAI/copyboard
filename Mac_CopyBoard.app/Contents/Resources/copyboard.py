@@ -2,7 +2,10 @@
 # CopyBoard — clipboard manager stile Windows Win+V per macOS
 # ⌘V apre la finestrella dei recenti; frecce/Invio o mouse per scegliere.
 import os, json, time, hashlib, threading
+import subprocess
 import objc
+
+AX_PROMPTED = False
 from Foundation import NSObject, NSMakeRect, NSData, NSDate, NSTimer, NSRunLoop, NSDefaultRunLoopMode
 from AppKit import (NSApplication, NSApp, NSPasteboard, NSImage, NSColor,
                     NSFont, NSBezierPath, NSStatusBar, NSMenu, NSMenuItem,
@@ -13,6 +16,8 @@ from AppKit import (NSPanel, NSView, NSWindowStyleMaskBorderless,
 from Quartz import *
 from Quartz import CoreGraphics as CG
 from AppKit import NSMouseInRect
+from AppKit import (NSTableView, NSTextField, NSImageView, NSScrollView,
+                    NSIndexSet, NSLineBreakByWordWrapping, NSView as _NSView)
 
 APP_DIR = os.path.expanduser("~/.copyboard")
 IMG_DIR = os.path.join(APP_DIR, "images")
@@ -139,22 +144,12 @@ def write_clipboard(item):
 
 
 # ---------------------------------------------------------------- picker view
-# Tema macOS nativo: vibrancy HUD, blu sistema, SF Pro
-ROW_H = 36
+# UI nativa macOS: NSTableView su vibrancy HUD, selezione accento di sistema
+ROW_H_MIN = 36.0
+LINE_H = 16.0
+MAX_LINES = 4
 VISIBLE_ROWS = 8
-FOOTER_H = 22
-PAD_Y = 6
-LINE_H = 16          # altezza riga di testo dentro un item
-MAX_LINES = 4        # massimo righe mostrate per item (dopo: "...")
-MAX_SHOW = 30
 
-def mac_colors():
-    return {
-        "accent": NSColor.controlAccentColor(),
-        "text": NSColor.labelColor(),
-        "dim": NSColor.secondaryLabelColor(),
-        "hint": NSColor.tertiaryLabelColor(),
-    }
 
 class KeyPanel(NSPanel):
     """NSPanel borderless che puo' ricevere la tastiera."""
@@ -165,169 +160,122 @@ class KeyPanel(NSPanel):
         return True
 
 
-class PickerView(NSView):
-    def initWithItems_(self, _):
-        self = objc.super(PickerView, self).initWithFrame_(
-            NSMakeRect(0, 0, PANEL_W, PANEL_H))
+class PickerTable(NSTableView):
+    """NSTableView con Invio/Esc/⌘V e click-singolo=incolla."""
+    def keyDown_(self, ev):
+        kc = ev.keyCode()
+        c = ev.characters()
+        if kc == 36 or kc == 76:              # invio
+            self.confirmSelected(); return
+        if kc == 53:                          # esc
+            Picker.hide(); return
+        if c == "v" and (int(ev.modifierFlags()) & int(kCGEventFlagMaskCommand)):
+            self.confirmSelected(); return
+        objc.super(PickerTable, self).keyDown_(ev)
+
+    @objc.python_method
+    def confirmSelected(self):
+        ds = self.dataSource()
+        r = self.selectedRow()
+        if ds and 0 <= r < len(ds.items):
+            ds.confirm_with_item(ds.items[r])
+
+    def mouseDown_(self, ev):
+        objc.super(PickerTable, self).mouseDown_(ev)
+        ds = self.dataSource()
+        r = self.clickedRow()
+        if ds and r is not None and r >= 0 and r < len(ds.items):
+            ds.confirm_with_item(ds.items[r])
+
+
+class PickerData(NSObject):
+    """Datasource/delegate della tabella + logica di conferma."""
+
+    def initWithTable_(self, tv):
+        self = objc.super(PickerData, self).init()
         self.items = []
-        self.sel = 0
-        self.thumbs = []
-        self.scroll = 0
-        self.h = PANEL_H
+        self.tv = tv
+        self.h = 380
         return self
 
-    def isFlipped(self):
-        return True
-
-    def acceptsFirstResponder(self):
-        return True
-
-    def _row_lines(self, it):
-        """Numero di righe di testo per l'item (wrap alla larghezza pannello)."""
-        if it["type"] == "image":
-            return 1
-        txt = " ".join(l for l in it["text"].strip().split("\n") if l.strip())
-        if not txt:
-            return 1
-        import math
-        return max(1, math.ceil(len(txt) / 50))
-
-    def _layout_rows(self):
-        """Offset y cumulativo di ogni item."""
-        self.row_y = []
-        y = PAD_Y
-        for i, it in enumerate(self.items):
-            lines = min(self._row_lines(it), MAX_LINES)
-            rh = lines * LINE_H + 8
-            self.row_y.append((y, rh))
-            y += rh + 2
-
+    @objc.python_method
     def refresh(self):
-        self.items = list(History.items)[:MAX_SHOW]
-        self.sel = 0
-        self.scroll = 0
-        self._layout_rows()
+        self.items = list(History.items)[:30]
+        self.tv.reloadData()
         if self.items:
-            total = sum(rh + 2 for _, rh in self.row_y)
-            max_h = PAD_Y * 2 + total - 2 + FOOTER_H
-            cap_h = PAD_Y * 2 + VISIBLE_ROWS * (ROW_H + 2) + FOOTER_H
-            h = int(min(max_h, cap_h))
-        else:
-            h = int(PAD_Y * 2 + ROW_H + FOOTER_H)
+            self.tv.selectRowIndexes_byExtendingSelection_(
+                NSIndexSet.indexSetWithIndex_(0), False)
+            self.tv.scrollRowToVisible_(0)
+        # adatta altezza pannello al contenuto (max 8 righe)
+        total = sum(self.row_height(i) for i in range(len(self.items)))
+        h = min(total + 34, 8 * 38 + 40)
         self.h = h
-        self._rebuild_thumbs()
-        if self.window():
-            f = self.window().frame()
+        win = self.tv.window()
+        if win and win.isVisible():
+            f = win.frame()
             f.origin.y += f.size.height - h
             f.size.height = h
-            self.window().setFrame_display_(f, True)
-        self.setNeedsDisplay_(True)
-
-    def _visible_range(self):
-        """Indici visibili nello spazio disponibile."""
-        if not getattr(self, 'row_y', None) or not self.items:
-            return 0, 0
-        avail = self.h - FOOTER_H - PAD_Y
-        lo = max(0, min(self.scroll, len(self.items) - 1))
-        hi = lo
-        used = 0
-        while hi < len(self.items):
-            _, rh = self.row_y[hi]
-            if used + rh > avail and hi > lo:
-                break
-            used += rh + 2
-            hi += 1
-        return lo, hi
-
-    def _rebuild_thumbs(self):
-        """Crea/aggiorna le subview thumbnail per gli item immagine."""
-        for sv in list(self.thumbs):
-            sv.removeFromSuperview()
-        self.thumbs = []
-        if not getattr(self, 'row_y', None):
-            return
-        lo, hi = self._visible_range()
-        for i in range(lo, hi):
-            it = self.items[i]
-            if it["type"] != "image":
-                continue
-            img = NSImage.alloc().initWithContentsOfFile_(it["path"])
-            if not img:
-                continue
-            y, rh = self.row_y[i]
-            tw = ROW_H - 12
-            iv = NSImageView.alloc().initWithFrame_(NSMakeRect(38, y + 6, tw + 20, tw))
-            iv.setImage_(img)
-            iv.setImageScaling_(1)
-            iv.setWantsLayer_(True)
-            iv.layer().setCornerRadius_(4.0)
-            iv.layer().setMasksToBounds_(True)
-            self.addSubview_(iv)
-            self.thumbs.append(iv)
-
-    def drawRect_(self, rect):
-        try:
-            self._draw(rect)
-        except Exception:
-            import traceback
-            traceback.print_exc()
+            win.setFrame_display_(f, True)
 
     @objc.python_method
-    def _draw(self, rect):
+    def row_height(self, i):
+        if i >= len(self.items):
+            return ROW_H_MIN
+        it = self.items[i]
+        if it["type"] == "image":
+            return ROW_H_MIN
+        txt = " ".join(l for l in it["text"].strip().split("\n") if l.strip())
+        import math
+        lines = max(1, math.ceil(len(txt) / 52.0))
+        return max(ROW_H_MIN, lines * LINE_H + 10)
+
+    # --- NSTableView datasource ---
+    def numberOfRowsInTableView_(self, tv):
+        return len(self.items)
+
+    def tableView_viewForTableColumn_row_(self, tv, col, row):
+        it = self.items[row]
         mc = mac_colors()
-        w = self.bounds().size.width
-        f = NSFont.systemFontOfSize_(13)
-        fs = NSFont.systemFontOfSize_(10)
-        if not self.items:
-            self._drawtext("Clipboard vuota", 16, 20, f, mc["dim"])
-            return
-        lo, hi = self._visible_range()
-        max_chars = 50
-        for i in range(lo, hi):
-            it = self.items[i]
-            y, rh = self.row_y[i]
-            r = NSMakeRect(6, y - 3, w - 12, rh + 2)
-            sel = (i == self.sel)
-            if sel:
-                mc["accent"].set()
-                NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(r, 6, 6).fill()
-            icon = "\U0001F5BC" if it["type"] == "image" else "\U0001F4DD"
-            tcol = NSColor.whiteColor() if sel else mc["text"]
-            self._drawtext(icon, r.origin.x + 10, y + 7, f, tcol)
-            tx = r.origin.x + 34
-            if it["type"] == "image":
-                label = (it.get("size") and "Immagine \u00b7 " + it["size"]) or "Immagine"
-                self._drawtext(label, tx + 42, y + 7, f, tcol)
-            else:
-                txt = " ".join(l for l in it["text"].strip().split("\n") if l.strip())
-                # wrap manuale a ~50 caratteri, max MAX_LINES righe
-                lines = []
-                while txt and len(lines) < MAX_LINES:
-                    lines.append(txt[:max_chars])
-                    txt = txt[max_chars:]
-                if txt:
-                    lines[-1] = lines[-1][:-1] + "\u2026"
-                for j, ln in enumerate(lines):
-                    self._drawtext(ln, tx, y + 4 + j * LINE_H, f, tcol)
-        hb = self.bounds()
-        fy = hb.size.height - FOOTER_H + 7
-        # indicatore scroll se ci sono item nascosti
-        _, vis_hi = self._visible_range()
-        if vis_hi < len(self.items):
-            fsb = NSFont.boldSystemFontOfSize_(9)
-            self._drawtext("\u25bc", w - 30, fy, fsb, mc["hint"])
-        self._drawtext("\u2191\u2193 incolla \u00b7 esc chiudi", 12, fy, fs, mc["hint"])
-        self._drawtext("RobZomb", w - 58, fy, fs, mc["hint"])
+        cell = tv.makeViewWithIdentifier_owner_("cell", self)
+        if cell is None:
+            cell = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_W - 16, ROW_H_MIN))
+            icon = NSImageView.alloc().initWithFrame_(NSMakeRect(6, 7, 22, 22))
+            icon.setTag_(1)
+            icon.setImageScaling_(1)
+            icon.setWantsLayer_(True)
+            icon.layer().setCornerRadius_(3.0)
+            icon.layer().setMasksToBounds_(True)
+            txt = NSTextField.alloc().initWithFrame_(NSMakeRect(34, 6, PANEL_W - 120, ROW_H_MIN - 10))
+            txt.setTag_(2)
+            txt.setBezeled_(False)
+            txt.setEditable_(False)
+            txt.setSelectable_(False)
+            txt.setDrawsBackground_(False)
+            txt.setLineBreakMode_(NSLineBreakByWordWrapping)
+            txt.setAutoresizingMask_(1 << 1)  # width
+            cell.addSubview_(icon)
+            cell.addSubview_(txt)
+            cell.setIdentifier_("cell")
+        icon_v = cell.viewWithTag_(1)
+        txt_v = cell.viewWithTag_(2)
+        txt_v.font = NSFont.systemFontOfSize_(13)
+        if it["type"] == "image":
+            img = NSImage.alloc().initWithContentsOfFile_(it["path"])
+            icon_v.setImage_(img if img else NSImage.imageNamed_(NSImageNameMultipleDocuments))
+            icon_v.setHidden_(False)
+            sz = it.get("size") or ""
+            txt_v.stringValue = ("Immagine \u00b7 " + sz) if sz else "Immagine"
+        else:
+            icon_v.setImage_(NSImage.imageNamed_(NSImageNameMultipleDocuments))
+            icon_v.setHidden_(True)
+            txt_v.stringValue = " ".join(l for l in it["text"].strip().split("\n") if l.strip())
+            txt_v.toolTip = txt_v.stringValue[:500]
+        return cell
 
-    @objc.python_method
-    def _drawtext(self, text, x, y, font, color=None):
-        from AppKit import NSAttributedString
-        attrs = {NSFontAttributeName: font}
-        if color is not None:
-            attrs[NSForegroundColorAttributeName] = color
-        attr = NSAttributedString.alloc().initWithString_attributes_(str(text), attrs)
-        attr.drawAtPoint_((x, y))
+    def tableView_heightOfRow_(self, tv, row):
+        return self.row_height(row)
 
+    # --- conferma ---
     @objc.python_method
     def confirm_with_item(self, item):
         print("[CopyBoard] confermato:", (item.get("text") or item.get("path"))[:40])
@@ -346,49 +294,6 @@ class PickerView(NSView):
             print("[CopyBoard] cmd-v inviato")
         threading.Thread(target=_paste, daemon=True).start()
 
-    def confirm(self):
-        if 0 <= self.sel < len(self.items):
-            self.confirm_with_item(self.items[self.sel])
-
-    def _ensure_visible(self):
-        lo, hi = self._visible_range()
-        if self.sel < lo:
-            self.scroll = self.sel
-        elif self.sel >= hi:
-            self.scroll = self.sel
-        self.scroll = max(0, min(self.scroll, len(self.items) - 1))
-        self._rebuild_thumbs()
-
-    def keyDown_(self, ev):
-        c = ev.characters()
-        kc = ev.keyCode()
-        if kc == 125 or c == "\x1f":           # giu'
-            self.sel = min(self.sel + 1, len(self.items) - 1)
-            self._ensure_visible()
-        elif kc == 126 or c == "\x1e":          # su
-            self.sel = max(self.sel - 1, 0)
-            self._ensure_visible()
-        elif kc == 36 or kc == 76:              # invio
-            self.confirm(); return
-        elif kc == 53:                          # esc
-            Picker.hide(); return
-        elif c == "v" and (ev.modifierFlags() & CGEventFlags.kCGEventFlagMaskCommand):
-            self.confirm(); return              # ⌘V dentro il picker = conferma
-        else:
-            return
-        self.setNeedsDisplay_(True)
-
-    def mouseDown_(self, ev):
-        p = self.convertPoint_fromView_(ev.locationInWindow(), None)
-        idx = None
-        for i, (y, rh) in enumerate(getattr(self, "row_y", [])):
-            if y - 3 <= p.y <= y + rh:
-                idx = i
-                break
-        print("[CopyBoard] click riga:", idx)
-        if idx is not None and 0 <= idx < len(self.items):
-            self.confirm_with_item(self.items[idx])
-
 
 class Picker(NSObject):
     panel = None
@@ -398,7 +303,6 @@ class Picker(NSObject):
     def ensure(cls):
         if cls.panel:
             return
-        v = PickerView.alloc().initWithItems_(None)
         st = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
         p = KeyPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, PANEL_W, PANEL_H), st, NSBackingStoreBuffered, False)
@@ -406,35 +310,55 @@ class Picker(NSObject):
         p.setOpaque_(False)
         p.setBackgroundColor_(NSColor.clearColor())
         p.setHasShadow_(True)
-        try:
-            p.setAlphaValue_(0.97)
-        except Exception:
-            pass
-        try:
-            from AppKit import (NSVisualEffectView, NSVisualEffectMaterialHUDWindow,
-                                NSVisualEffectBlendingModeBehindWindow, NSVisualEffectStateActive)
-            ev = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_W, PANEL_H))
-            ev.setMaterial_(NSVisualEffectMaterialHUDWindow)
-            ev.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
-            ev.setState_(NSVisualEffectStateActive)
-            ev.setWantsLayer_(True)
-            ev.layer().setCornerRadius_(12.0)
-            ev.layer().setBorderWidth_(1.0)
-            ev.layer().setBorderColor_(NSColor.separatorColor().CGColor())
-            ev.setAutoresizingMask_(1 << 1 | 1 << 2)
-            ev.addSubview_(v)
-            p.setContentView_(ev)
-        except Exception:
-            v.setWantsLayer_(True)
-            p.setContentView_(v)
-        p.setInitialFirstResponder_(v)
-        cls.panel, cls.view = p, v
+
+        # vibrancy HUD nativa
+        from AppKit import (NSVisualEffectView, NSVisualEffectMaterialHUDWindow,
+                            NSVisualEffectBlendingModeBehindWindow, NSVisualEffectStateActive,
+                            NSScrollView)
+        ev = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_W, PANEL_H))
+        ev.setMaterial_(NSVisualEffectMaterialHUDWindow)
+        ev.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+        ev.setState_(NSVisualEffectStateActive)
+        ev.setWantsLayer_(True)
+        ev.layer().setCornerRadius_(12.0)
+        ev.layer().setMasksToBounds_(True)
+        ev.layer().setBorderWidth_(1.0)
+        ev.layer().setBorderColor_(NSColor.separatorColor().CGColor())
+
+        # tabella nativa dentro scroll view
+        from AppKit import NSTableColumn, NSTableViewStylePlain
+        tv = PickerTable.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_W, PANEL_H))
+        col = NSTableColumn.alloc().initWithIdentifier_("main")
+        col.setWidth_(PANEL_W - 16)
+        tv.addTableColumn_(col)
+        tv.outlineTableColumn_ if False else None
+        tv.setHeaderView_(None)
+        tv.setRowHeight_(ROW_H_MIN)
+        tv.setAllowsEmptySelection_(True)
+        tv.setGridStyleMask_(0)
+        tv.setBackgroundColor_(NSColor.clearColor())
+        tv.setSelectionHighlightStyle_(1)
+        tv.setUsesAlternatingRowBackgroundColors_(False)
+
+        sv = NSScrollView.alloc().initWithFrame_(ev.bounds())
+        sv.setDocumentView_(tv)
+        sv.setHasVerticalScroller_(True)
+        sv.setDrawsBackground_(False)
+        sv.setAutohidesScrollers_(True)
+        ev.addSubview_(sv)
+
+        data = PickerData.alloc().initWithTable_(tv)
+        tv.setDataSource_(data)
+        tv.setDelegate_(data)
+        data.refresh()
+
+        p.setContentView_(ev)
+        cls.panel, cls.view = p, data
         # click fuori dal pannello -> chiudi
-        from AppKit import NSEvent, NSLeftMouseDownMask
+        from AppKit import NSEvent, NSEventMaskLeftMouseDown
         cls.monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-            NSLeftMouseDownMask,
-            lambda ev: cls.hide() if cls.panel and cls.panel.isVisible()
-                       and not NSMouseInRect(ev.locationInWindow(), cls.panel.frame(), False) else None)
+            NSEventMaskLeftMouseDown,
+            lambda e: cls.hide() if cls.panel and cls.panel.isVisible() else None)
 
     @classmethod
     def show(cls):
@@ -443,17 +367,14 @@ class Picker(NSObject):
         f = NSScreen.mainScreen().frame()
         x = f.origin.x + f.size.width - PANEL_W - 60
         y = f.origin.y + f.size.height * 0.28
-        cls.panel.setFrameTopLeftPoint_((x, y + PANEL_H))
+        cls.panel.setFrameTopLeftPoint_((x, y + cls.view.h))
         cls.panel.makeKeyAndOrderFront_(None)
-        cls.view.window().makeFirstResponder_(cls.view)
+        cls.panel.makeFirstResponder_(cls.panel.contentView().subviews()[0].documentView())
 
     @classmethod
     def hide(cls):
         if cls.panel:
             cls.panel.orderOut_(None)
-
-
-suppress_until = [0.0]  # timestamp fino a cui il tap lascia passare il cmd-v sintetico
 
 
 def post_synthetic_cmd_v():
@@ -489,12 +410,34 @@ def tap_callback(proxy, etype, event, refcon):
 
 
 def install_tap():
+    # Se non abbiamo Accessibilità, mostra il DIALOGO NATIVO di macOS
+    # (kAXTrustedCheckOptionPrompt) — l'utente clicca OK una volta e poi
+    # l'app funziona standalone per sempre, senza Terminal. Il prompt
+    # viene mostrato UNA sola volta (flag), i retry successivi sono silenziosi.
+    global AX_PROMPTED
+    try:
+        from ApplicationServices import AXIsProcessTrustedWithOptions
+        from Foundation import NSDictionary
+        prompt = not AX_PROMPTED
+        AX_PROMPTED = True
+        opts = NSDictionary.dictionaryWithObject_forKey_(prompt, "AXTrustedCheckOptionPrompt")
+        if not AXIsProcessTrustedWithOptions(opts):
+            if prompt:
+                print("[CopyBoard] Dialogo Accessibilità mostrato — attendi il clic...")
+            # non blocco: il retry timer (ogni 4s) attiverà il tap appena concesso
+            return False
+    except Exception as e:
+        print("[CopyBoard] check AX:", e)
     mask = CGEventMaskBit(kCGEventKeyDown)
     tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap,
                            kCGEventTapOptionDefault, mask, tap_callback, None)
     if not tap:
-        print("[CopyBoard] ⚠️  Event tap negata: concedi Accessibilità in "
-              "Impostazioni › Privacy › Accessibilità e riavvia CopyBoard.")
+        print("[CopyBoard] Event tap negata — apro Impostazioni › Accessibilità")
+        try:
+            subprocess.Popen(["open",
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"])
+        except Exception:
+            pass
         return False
     src = CFMachPortCreateRunLoopSource(None, tap, 0)
     CFRunLoopAddSource(CFRunLoopGetMain(), src, kCFRunLoopCommonModes)
@@ -529,10 +472,25 @@ class Delegate(NSObject):
 
         self.last_count = NSPasteboard.generalPasteboard().changeCount()
         print("[CopyBoard] tap:", install_tap())
+        if not tap_ref.get("tap"):
+            # retry automatico: quando l'utente concede l'accessibilità,
+            # il tap si attiva da solo (senza riavviare l'app)
+            print("[CopyBoard] retry tap ogni 4s...")
+            self.tap_retry = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                4.0, self, "retryTap:", None, True)
         print("[CopyBoard] creo timer...")
         self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             0.35, self, "pollClipboard:", None, True)
         print("[CopyBoard] timer aggiunto, runloop attivo")
+
+    def retryTap_(self, timer):
+        if tap_ref.get("tap"):
+            timer.invalidate()
+            print("[CopyBoard] tap attivato!")
+            return
+        if install_tap():
+            timer.invalidate()
+            print("[CopyBoard] tap attivato!")
 
     def openPicker_(self, sender):
         Picker.show()

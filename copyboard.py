@@ -2,7 +2,10 @@
 # CopyBoard — clipboard manager stile Windows Win+V per macOS
 # ⌘V apre la finestrella dei recenti; frecce/Invio o mouse per scegliere.
 import os, json, time, hashlib, threading
+import subprocess
 import objc
+
+AX_PROMPTED = False
 from Foundation import NSObject, NSMakeRect, NSData, NSDate, NSTimer, NSRunLoop, NSDefaultRunLoopMode
 from AppKit import (NSApplication, NSApp, NSPasteboard, NSImage, NSColor,
                     NSFont, NSBezierPath, NSStatusBar, NSMenu, NSMenuItem,
@@ -407,12 +410,34 @@ def tap_callback(proxy, etype, event, refcon):
 
 
 def install_tap():
+    # Se non abbiamo Accessibilità, mostra il DIALOGO NATIVO di macOS
+    # (kAXTrustedCheckOptionPrompt) — l'utente clicca OK una volta e poi
+    # l'app funziona standalone per sempre, senza Terminal. Il prompt
+    # viene mostrato UNA sola volta (flag), i retry successivi sono silenziosi.
+    global AX_PROMPTED
+    try:
+        from ApplicationServices import AXIsProcessTrustedWithOptions
+        from Foundation import NSDictionary
+        prompt = not AX_PROMPTED
+        AX_PROMPTED = True
+        opts = NSDictionary.dictionaryWithObject_forKey_(prompt, "AXTrustedCheckOptionPrompt")
+        if not AXIsProcessTrustedWithOptions(opts):
+            if prompt:
+                print("[CopyBoard] Dialogo Accessibilità mostrato — attendi il clic...")
+            # non blocco: il retry timer (ogni 4s) attiverà il tap appena concesso
+            return False
+    except Exception as e:
+        print("[CopyBoard] check AX:", e)
     mask = CGEventMaskBit(kCGEventKeyDown)
     tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap,
                            kCGEventTapOptionDefault, mask, tap_callback, None)
     if not tap:
-        print("[CopyBoard] ⚠️  Event tap negata: concedi Accessibilità in "
-              "Impostazioni › Privacy › Accessibilità e riavvia CopyBoard.")
+        print("[CopyBoard] Event tap negata — apro Impostazioni › Accessibilità")
+        try:
+            subprocess.Popen(["open",
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"])
+        except Exception:
+            pass
         return False
     src = CFMachPortCreateRunLoopSource(None, tap, 0)
     CFRunLoopAddSource(CFRunLoopGetMain(), src, kCFRunLoopCommonModes)
@@ -447,10 +472,25 @@ class Delegate(NSObject):
 
         self.last_count = NSPasteboard.generalPasteboard().changeCount()
         print("[CopyBoard] tap:", install_tap())
+        if not tap_ref.get("tap"):
+            # retry automatico: quando l'utente concede l'accessibilità,
+            # il tap si attiva da solo (senza riavviare l'app)
+            print("[CopyBoard] retry tap ogni 4s...")
+            self.tap_retry = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                4.0, self, "retryTap:", None, True)
         print("[CopyBoard] creo timer...")
         self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             0.35, self, "pollClipboard:", None, True)
         print("[CopyBoard] timer aggiunto, runloop attivo")
+
+    def retryTap_(self, timer):
+        if tap_ref.get("tap"):
+            timer.invalidate()
+            print("[CopyBoard] tap attivato!")
+            return
+        if install_tap():
+            timer.invalidate()
+            print("[CopyBoard] tap attivato!")
 
     def openPicker_(self, sender):
         Picker.show()

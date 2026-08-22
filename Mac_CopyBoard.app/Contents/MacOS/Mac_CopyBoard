@@ -1,10 +1,7 @@
 #!/bin/bash
-# CopyBoard launcher — passa per Terminal.app per ereditarne il permesso Accessibilità
+# Launcher standalone: esegue copyboard.py direttamente, senza Terminal.
 LOG="$HOME/.copyboard.log"
-for PID in $(pgrep -f "copyboard.py" 2>/dev/null); do kill -9 "$PID" 2>/dev/null; done
-osascript <<'APPLESCRIPT' >/dev/null 2>&1
-tell application "Terminal"
-    activate
-    do script "/usr/bin/python3 -u /Users/robzomb/Mac_CopyBoard/copyboard.py >> /Users/robzomb/.copyboard.log 2>&1 & exit"
-end tell
-APPLESCRIPT
+for PID in $(pgrep -f "Mac_CopyBoard/copyboard.py" 2>/dev/null); do
+    [ "$PID" != "$$" ] && kill -9 "$PID" 2>/dev/null
+done
+exec /usr/bin/python3 -u "$(dirname "$0")/../Resources/copyboard.py" >> "$LOG" 2>&1
